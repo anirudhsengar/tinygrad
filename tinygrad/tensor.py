@@ -289,8 +289,7 @@ class Tensor(MathTrait):
     # NOTE: we allow cross device assign
     assert self.shape == x.shape, f"assign shape mismatch {self.shape} != {x.shape}"
     assert self.device == x.device, f"assign device mismatch {self.device} != {x.device}"
-    if self.dtype != x.dtype:
-      x = x.cast(self.dtype)
+    assert self.dtype == x.dtype, f"assign dtype mismatch {self.dtype} != {x.dtype}"
     self.uop = self.uop.assign(x.uop)
     return self
 
@@ -1262,9 +1261,7 @@ class Tensor(MathTrait):
 
   def __setitem__(self, indices, v:Tensor|ConstType) -> None:
     if isinstance(self.device, str) and self.device.startswith("DISK"):
-      # TODO: this is a hack for writing to DISK. remove with working assign
-      if v.__class__ is not Tensor: v = Tensor(v, device="CPU", dtype=self.dtype)
-      self.contiguous()._buffer().copyin(v.contiguous()._data())
+      self.realize()._getitem(indices).assign(v)
       return
     # NOTE: check that setitem target is valid first
     if not unwrap(self.uop.st).contiguous: raise RuntimeError("setitem target needs to be contiguous")
@@ -1272,8 +1269,13 @@ class Tensor(MathTrait):
     if not isinstance(v, Tensor): raise TypeError(f"can't set a {type(v).__name__} to a Tensor")
     if self.requires_grad or v.requires_grad: raise NotImplementedError("setitem with requires_grad is not supported")
 
-    v = v.cast(self.dtype)._broadcast_to(self.shape).contiguous()
-    self.assign(v)
+    res = self.realize()._getitem(indices, v)
+    # if shapes match and data is not shared it's a copy and we assign to self
+    if res.shape == self.shape and res.uop is not self.uop:
+      self.assign(res).realize()
+    else: # no copy, basic setitem
+      v = v.cast(res.dtype)._broadcast_to(_broadcast_shape(res.shape, v.shape)).contiguous()
+      res.assign(v).realize()
 
   def gather(self:Tensor, dim:int, index:Tensor) -> Tensor:
     """
